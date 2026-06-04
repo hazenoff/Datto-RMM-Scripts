@@ -2,7 +2,7 @@
 # =============================================================================
 # Paladin OneDrive & Teams Sync Reset [WIN]
 # Datto RMM Component | Script | PowerShell
-# Version: 1.0.0
+# Version: 1.0.1
 # Context: NT AUTHORITY\SYSTEM (LocalSystem)
 #
 # DESCRIPTION:
@@ -313,12 +313,12 @@ Write-Log "Found $($userProfiles.Count) user profile(s) to process"
 $totalErrors = 0
 
 if ($DoOneDrive) {
-    $odErrors    = Invoke-OneDriveReset -UserProfiles $userProfiles
+    $odErrors    = [int](Invoke-OneDriveReset -UserProfiles $userProfiles)
     $totalErrors += $odErrors
 }
 
 if ($DoTeams) {
-    $teamsErrors  = Invoke-TeamsReset -UserProfiles $userProfiles
+    $teamsErrors  = [int](Invoke-TeamsReset -UserProfiles $userProfiles)
     $totalErrors += $teamsErrors
 }
 
