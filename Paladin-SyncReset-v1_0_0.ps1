@@ -149,8 +149,8 @@ function Invoke-OneDriveReset {
     Write-Sep2
 
     # Stop OneDrive processes
-    Stop-ProcessSafe -ProcessName 'OneDrive.exe'
-    Stop-ProcessSafe -ProcessName 'FileCoAuth.exe'
+    Stop-ProcessSafe -ProcessName 'OneDrive.exe'  | Out-Null
+    Stop-ProcessSafe -ProcessName 'FileCoAuth.exe' | Out-Null
     Start-Sleep -Seconds 2
 
     $resetCount = 0
@@ -233,9 +233,9 @@ function Invoke-TeamsReset {
     Write-Sep2
 
     # Stop Teams processes
-    Stop-ProcessSafe -ProcessName 'Teams.exe'
-    Stop-ProcessSafe -ProcessName 'ms-teams.exe'
-    Stop-ProcessSafe -ProcessName 'TeamsMeetingAddin.exe'
+    Stop-ProcessSafe -ProcessName 'Teams.exe'           | Out-Null
+    Stop-ProcessSafe -ProcessName 'ms-teams.exe'        | Out-Null
+    Stop-ProcessSafe -ProcessName 'TeamsMeetingAddin.exe' | Out-Null
     Start-Sleep -Seconds 2
 
     $resetCount = 0
@@ -313,12 +313,12 @@ Write-Log "Found $($userProfiles.Count) user profile(s) to process"
 $totalErrors = 0
 
 if ($DoOneDrive) {
-    $odErrors    = [int](Invoke-OneDriveReset -UserProfiles $userProfiles)
+    $odErrors    = Invoke-OneDriveReset -UserProfiles $userProfiles
     $totalErrors += $odErrors
 }
 
 if ($DoTeams) {
-    $teamsErrors  = [int](Invoke-TeamsReset -UserProfiles $userProfiles)
+    $teamsErrors  = Invoke-TeamsReset -UserProfiles $userProfiles
     $totalErrors += $teamsErrors
 }
 
