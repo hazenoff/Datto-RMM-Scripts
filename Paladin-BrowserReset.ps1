@@ -15,108 +15,21 @@
 
     PRESERVES (never touched):
       Passwords (Login Data / logins.json / key4.db)
-      Bookmarks (Bookmarks / Bookmarks.bak / places.sqlite)
-      Browsing history (History / places.sqlite)
-      Certificates (cert9.db)
-      Favicons
+      Bookmarks
+      Browsing history
 
     Browsers covered:
       Google Chrome, Microsoft Edge, Brave, Vivaldi, Opera, Opera GX,
       Chromium, Mozilla Firefox, Waterfox, LibreWolf
 
-    AUDIT / COMPLIANCE:
-      Full audit log written to C:\ProgramData\Paladin\BrowserReset\
-      Log is ACL-hardened to SYSTEM + Administrators only (HIPAA-safe).
-      Every action is timestamped with machine context.
-      Preserved items are explicitly confirmed in log per user.
-      UDF slot 6 updated with outcome for Datto visibility.
-
     Runs as NT AUTHORITY\SYSTEM via Datto RMM.
     Targets all user profiles automatically.
 
     Paladin Business Consulting | Internal Use Only
-    Version: 3.0.0 | Min OS: Windows 10 / Server 2016
+    Version: 2.0.0 | Min OS: Windows 10 / Server 2016
 #>
 
-$script:ExitCode  = 0
-$script:Removed   = 0
-$script:Warned    = 0
-$script:Errors    = 0
-$script:Preserved = 0
-
-# ===========================================================================
-# CONSTANTS
-# ===========================================================================
-$LogDir   = 'C:\ProgramData\Paladin\BrowserReset'
-$LogFile  = "$LogDir\BrowserReset.log"
-$UDFSlot  = 6
-$UDFPath  = 'HKLM:\SOFTWARE\CentraStage'
-$UDFName  = "Custom$UDFSlot"
-$MaxLogMB = 5
-
-# ===========================================================================
-# AUDIT / LOGGING HELPERS
-# ===========================================================================
-
-function Write-AuditLog {
-    param([string]$Message, [string]$Level = 'INFO')
-    $ts   = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-    $line = "[$ts] [$Level] $Message"
-    Write-Host $line
-    try {
-        Add-Content -Path $LogFile -Value $line -EA SilentlyContinue
-    } catch {}
-}
-
-function Write-AuditSeparator {
-    Write-AuditLog ('=' * 60)
-}
-
-function Write-PreservedConfirmation {
-    param([string]$User, [string]$Browser, [string[]]$PreservedItems)
-    foreach ($item in $PreservedItems) {
-        Write-AuditLog "  [PRESERVED] User:$User Browser:$Browser Item:$item -- NOT touched"
-        $script:Preserved++
-    }
-}
-
-function Set-UDFStatus {
-    param([string]$Text)
-    $v = $Text.Substring(0, [Math]::Min($Text.Length, 255))
-    try {
-        if (-not (Test-Path $UDFPath)) { New-Item -Path $UDFPath -Force -EA SilentlyContinue | Out-Null }
-        New-ItemProperty -Path $UDFPath -Name $UDFName -Value $v -PropertyType String -Force -EA SilentlyContinue | Out-Null
-    } catch {}
-}
-
-function Initialize-AuditLog {
-    # Create log directory
-    if (-not (Test-Path $LogDir)) {
-        New-Item -Path $LogDir -ItemType Directory -Force -EA SilentlyContinue | Out-Null
-    }
-
-    # Rotate log if over MaxLogMB
-    if ((Test-Path $LogFile) -and ((Get-Item $LogFile -EA SilentlyContinue).Length / 1MB) -gt $MaxLogMB) {
-        $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-        Move-Item -LiteralPath $LogFile -Destination "$LogFile.$stamp.bak" -Force -EA SilentlyContinue
-    }
-
-    # Harden log directory ACL -- SYSTEM + Administrators only (HIPAA-safe)
-    try {
-        $acl  = Get-Acl -Path $LogDir -EA Stop
-        $acl.SetAccessRuleProtection($true, $false)
-        $acl.Access | ForEach-Object { $acl.RemoveAccessRule($_) | Out-Null }
-        $sysRule  = New-Object System.Security.AccessControl.FileSystemAccessRule(
-            'NT AUTHORITY\SYSTEM', 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
-        $admRule  = New-Object System.Security.AccessControl.FileSystemAccessRule(
-            'BUILTIN\Administrators', 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
-        $acl.AddAccessRule($sysRule)
-        $acl.AddAccessRule($admRule)
-        Set-Acl -Path $LogDir -AclObject $acl -EA Stop
-    } catch {
-        Write-AuditLog "WARN: Could not harden log ACL: $($_.Exception.Message)" 'WARN'
-    }
-}
+$script:ExitCode = 0
 
 # ===========================================================================
 # HELPERS
@@ -137,27 +50,26 @@ function Get-UserHives {
 }
 
 function Remove-PathItems {
-    param([string]$User, [string]$Browser, [String[]]$Paths)
+    param([String[]]$Paths)
     foreach ($p in $Paths) {
         if (!(Test-Path $p)) { continue }
         try {
             Remove-Item -Path $p -Recurse -Force -EA Stop
-            Write-AuditLog "  [REMOVED] User:$User Browser:$Browser Path:$(Split-Path $p -Leaf)"
-            $script:Removed++
+            Write-Host "    Removed: $p"
         } catch {
-            Write-AuditLog "  [WARN] User:$User Browser:$Browser Path:$(Split-Path $p -Leaf) -- $($_.Exception.Message)" 'WARN'
-            $script:Warned++
+            Write-Host "    [Warn] Could not remove '$p': $($_.Exception.Message)"
             $script:ExitCode = 1
         }
     }
 }
 
-# ===========================================================================
-# RESET FUNCTIONS
-# ===========================================================================
-
+# ---------------------------------------------------------------------------
+# Reset-ChromiumProfile
+# Covers Chrome, Edge, Brave, Vivaldi, Opera, Chromium (all Chromium-engine)
+# Preserves: Bookmarks, History, Login Data (passwords), Favicons
+# ---------------------------------------------------------------------------
 function Reset-ChromiumProfile {
-    param([String]$UserDataPath, [String]$Label, [String]$UserName)
+    param([String]$UserDataPath, [String]$Label)
 
     if (!(Test-Path $UserDataPath)) { return }
 
@@ -165,135 +77,150 @@ function Reset-ChromiumProfile {
                    Where-Object { $_.Name -eq 'Default' -or $_.Name -match '^Profile \d+$' }
 
     if (!$profileDirs) {
-        Write-AuditLog "  [$Label] No profiles found -- skipping"
+        Write-Host "  [$Label] No profiles found -- skipping."
         return
     }
 
     foreach ($dir in $profileDirs) {
         $base = $dir.FullName
-        Write-AuditLog "  [$Label] Resetting profile: $($dir.Name) for user: $UserName"
+        Write-Host "  [$Label] Resetting profile: $($dir.Name)"
 
-        # Settings
-        Remove-PathItems -User $UserName -Browser $Label -Paths @(
-            "$base\Preferences", "$base\Secure Preferences"
+        # Settings (browser recreates clean defaults on next launch)
+        Remove-PathItems -Paths @(
+            "$base\Preferences"
+            "$base\Secure Preferences"
         )
 
         # Extensions
-        Remove-PathItems -User $UserName -Browser $Label -Paths @(
-            "$base\Extensions", "$base\Extension State",
-            "$base\Extension Rules", "$base\External Extensions"
+        Remove-PathItems -Paths @(
+            "$base\Extensions"
+            "$base\Extension State"
+            "$base\Extension Rules"
+            "$base\External Extensions"
         )
 
         # Cookies + site data
-        Remove-PathItems -User $UserName -Browser $Label -Paths @(
-            "$base\Cookies", "$base\Network\Cookies",
-            "$base\Session Storage", "$base\Local Storage",
-            "$base\IndexedDB", "$base\Service Worker",
-            "$base\databases", "$base\QuotaManager",
-            "$base\QuotaManager-journal", "$base\Visited Links",
-            "$base\Top Sites", "$base\Top Sites-journal",
-            "$base\Shortcuts", "$base\Shortcuts-journal",
-            "$base\Web Data", "$base\Web Data-journal",
-            "$base\Network Action Predictor",
+        Remove-PathItems -Paths @(
+            "$base\Cookies"
+            "$base\Network\Cookies"
+            "$base\Session Storage"
+            "$base\Local Storage"
+            "$base\IndexedDB"
+            "$base\Service Worker"
+            "$base\databases"
+            "$base\QuotaManager"
+            "$base\QuotaManager-journal"
+            "$base\Visited Links"
+            "$base\Top Sites"
+            "$base\Top Sites-journal"
+            "$base\Shortcuts"
+            "$base\Shortcuts-journal"
+            "$base\Web Data"
+            "$base\Web Data-journal"
+            "$base\Network Action Predictor"
             "$base\Network Action Predictor-journal"
         )
 
         # Cache
-        Remove-PathItems -User $UserName -Browser $Label -Paths @(
-            "$base\Cache", "$base\Cache2", "$base\Code Cache",
-            "$base\GPUCache", "$base\Media Cache", "$base\Application Cache"
+        Remove-PathItems -Paths @(
+            "$base\Cache"
+            "$base\Cache2"
+            "$base\Code Cache"
+            "$base\GPUCache"
+            "$base\Media Cache"
+            "$base\Application Cache"
         )
 
-        # Search engines
-        Remove-PathItems -User $UserName -Browser $Label -Paths @("$base\Search Logos")
-
-        # Explicit preserved item confirmation (compliance audit trail)
-        $preservedItems = @(
-            'Bookmarks (user bookmarks file)',
-            'Bookmarks.bak (bookmark backup)',
-            'History (browsing history database)',
-            'History-journal',
-            'Login Data (saved passwords)',
-            'Login Data-journal',
-            'Favicons', 'Favicons-journal'
+        # Search engines (reset to browser default)
+        Remove-PathItems -Paths @(
+            "$base\Search Logos"
         )
-        Write-PreservedConfirmation -User $UserName -Browser $Label -PreservedItems $preservedItems
+
+        # PRESERVED (not touched):
+        #   Bookmarks      -- user bookmarks
+        #   Bookmarks.bak  -- backup
+        #   History        -- browsing history
+        #   History-journal
+        #   Login Data     -- saved passwords
+        #   Login Data-journal
+        #   Favicons
+        #   Favicons-journal
     }
 }
 
+# ---------------------------------------------------------------------------
+# Reset-FirefoxProfile
+# Covers Firefox, Waterfox, LibreWolf
+# Preserves: places.sqlite (bookmarks+history), key4.db, logins.json (passwords)
+# ---------------------------------------------------------------------------
 function Reset-FirefoxProfile {
-    param([String]$RoamingPath, [String]$LocalPath, [String]$Label, [String]$UserName)
+    param([String]$RoamingPath, [String]$LocalPath, [String]$Label)
 
     if (!(Test-Path $RoamingPath)) { return }
 
     $profileDirs = Get-ChildItem -Path $RoamingPath -Directory -EA SilentlyContinue
     if (!$profileDirs) {
-        Write-AuditLog "  [$Label] No profiles found -- skipping"
+        Write-Host "  [$Label] No profiles found -- skipping."
         return
     }
 
     foreach ($dir in $profileDirs) {
         $base      = $dir.FullName
         $localBase = Join-Path $LocalPath $dir.Name
-        Write-AuditLog "  [$Label] Resetting profile: $($dir.Name) for user: $UserName"
+        Write-Host "  [$Label] Resetting profile: $($dir.Name)"
 
-        # Settings
-        Remove-PathItems -User $UserName -Browser $Label -Paths @(
-            "$base\prefs.js", "$base\user.js"
+        # Settings (Firefox recreates defaults on next launch)
+        Remove-PathItems -Paths @(
+            "$base\prefs.js"
+            "$base\user.js"
         )
 
         # Extensions
-        Remove-PathItems -User $UserName -Browser $Label -Paths @(
-            "$base\extensions", "$base\extensions.json",
-            "$base\extension-preferences.json",
-            "$base\extension-settings.json",
+        Remove-PathItems -Paths @(
+            "$base\extensions"
+            "$base\extensions.json"
+            "$base\extension-preferences.json"
+            "$base\extension-settings.json"
             "$base\addonStartup.json.lz4"
         )
 
         # Cookies
-        Remove-PathItems -User $UserName -Browser $Label -Paths @(
-            "$base\cookies.sqlite", "$base\cookies.sqlite-wal",
+        Remove-PathItems -Paths @(
+            "$base\cookies.sqlite"
+            "$base\cookies.sqlite-wal"
             "$base\cookies.sqlite-shm"
         )
 
         # Session data
-        $sessions = Get-ChildItem -Path $base -Filter 'sessionstore*.jsonlz4' -Force -EA SilentlyContinue
-        foreach ($s in $sessions) {
-            try {
-                Remove-Item -LiteralPath $s.FullName -Force -EA Stop
-                Write-AuditLog "  [REMOVED] User:$UserName Browser:$Label Path:$($s.Name)"
-                $script:Removed++
-            } catch {
-                Write-AuditLog "  [WARN] User:$UserName Browser:$Label Path:$($s.Name) -- $($_.Exception.Message)" 'WARN'
-                $script:Warned++
-            }
-        }
+        Get-ChildItem -Path $base -Filter 'sessionstore*.jsonlz4' -Force -EA SilentlyContinue |
+            Remove-Item -Force -EA SilentlyContinue
 
         # Site storage
-        Remove-PathItems -User $UserName -Browser $Label -Paths @(
-            "$base\webappsstore.sqlite", "$base\webappsstore.sqlite-wal",
-            "$base\webappsstore.sqlite-shm", "$base\content-prefs.sqlite",
-            "$base\storage\default", "$base\IndexedDB"
+        Remove-PathItems -Paths @(
+            "$base\webappsstore.sqlite"
+            "$base\webappsstore.sqlite-wal"
+            "$base\webappsstore.sqlite-shm"
+            "$base\content-prefs.sqlite"
+            "$base\storage\default"
+            "$base\IndexedDB"
         )
 
         # Form history
-        Remove-PathItems -User $UserName -Browser $Label -Paths @(
-            "$base\formhistory.sqlite", "$base\formhistory.sqlite-wal",
+        Remove-PathItems -Paths @(
+            "$base\formhistory.sqlite"
+            "$base\formhistory.sqlite-wal"
             "$base\formhistory.sqlite-shm"
         )
 
-        # Cache
-        Remove-PathItems -User $UserName -Browser $Label -Paths @("$localBase\cache2")
+        # Cache (local path)
+        Remove-PathItems -Paths @("$localBase\cache2")
 
-        # Explicit preserved item confirmation
-        $preservedItems = @(
-            'places.sqlite (bookmarks + browsing history)',
-            'key4.db (password encryption key)',
-            'logins.json (saved passwords)',
-            'favicons.sqlite (site icons)',
-            'cert9.db (certificates)'
-        )
-        Write-PreservedConfirmation -User $UserName -Browser $Label -PreservedItems $preservedItems
+        # PRESERVED (not touched):
+        #   places.sqlite   -- bookmarks + history
+        #   key4.db         -- password encryption key
+        #   logins.json     -- saved passwords
+        #   favicons.sqlite -- site icons
+        #   cert9.db        -- certificates
     }
 }
 
@@ -301,59 +228,34 @@ function Reset-FirefoxProfile {
 # MAIN
 # ===========================================================================
 
-# Initialize log + ACL
-Initialize-AuditLog
+Write-Host '======================================================='
+Write-Host ' Paladin Browser Factory Reset v2.0.0'
+Write-Host ' Preserving: Passwords | Bookmarks | History'
+Write-Host '======================================================='
 
-# Collect machine context
-$machineName = $env:COMPUTERNAME
-$domainName  = $env:USERDOMAIN
-$osInfo      = (Get-WmiObject Win32_OperatingSystem -EA SilentlyContinue).Caption
-$runAs       = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-$siteName    = $env:CS_PROFILE_NAME
-if ([string]::IsNullOrEmpty($siteName)) { $siteName = 'UNKNOWN' }
-$runTime     = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-
-Write-AuditSeparator
-Write-AuditLog 'PALADIN BROWSER FACTORY RESET -- AUDIT LOG'
-Write-AuditLog "Script Version : 3.0.0"
-Write-AuditLog "Timestamp      : $runTime"
-Write-AuditLog "Machine        : $machineName"
-Write-AuditLog "Domain         : $domainName"
-Write-AuditLog "OS             : $osInfo"
-Write-AuditLog "Run As         : $runAs"
-Write-AuditLog "Datto Site     : $siteName"
-Write-AuditSeparator
-Write-AuditLog 'ACTION         : Browser Factory Reset'
-Write-AuditLog 'SCOPE          : All user profiles on this machine'
-Write-AuditLog 'PRESERVED      : Passwords | Bookmarks | History | Certificates'
-Write-AuditLog 'REMOVED        : Extensions | Cookies | Cache | Settings | Site Data'
-Write-AuditSeparator
-
-Set-UDFStatus "BrowserReset: Running | $machineName | $runTime"
-
-# Step 1 -- Kill browser processes
-Write-AuditLog '[Step 1] Stopping browser processes'
+# ---- Kill all browser processes up front ----------------------------------
 $browserProcs = @('chrome','msedge','firefox','brave','opera','vivaldi',
                   'waterfox','librewolf','chromium')
+Write-Host "`n[Step 1] Stopping browser processes..."
 foreach ($proc in $browserProcs) {
     $found = Get-Process -Name $proc -EA SilentlyContinue
     if ($found) {
-        Write-AuditLog "  Stopping: $proc ($($found.Count) instance(s))"
+        Write-Host "  Stopping: $proc ($($found.Count) instance(s))"
         $found | Stop-Process -Force -EA SilentlyContinue
     }
 }
 Start-Sleep -Seconds 2
 
-# Step 2 -- Enumerate profiles
-Write-AuditLog '[Step 2] Enumerating user profiles'
+# ---- Enumerate all user profiles ------------------------------------------
+Write-Host "`n[Step 2] Enumerating user profiles..."
 $allProfiles = Get-UserHives
 if (!$allProfiles -or $allProfiles.Count -eq 0) {
-    Write-AuditLog 'ERROR: No user profiles found' 'ERROR'
-    Set-UDFStatus "BrowserReset: FAILED -- no profiles | $machineName | $runTime"
+    Write-Host '[Error] No user profiles found.'
     exit 1
 }
 
-# Load offline hives
+# Load offline hives so we can enumerate paths (not strictly required for file
+# ops, but ensures consistency with the Paladin pattern)
 $loadedHives = @()
 foreach ($u in $allProfiles) {
     if (!(Test-Path "Registry::HKEY_USERS\$($u.SID)")) {
@@ -361,86 +263,59 @@ foreach ($u in $allProfiles) {
         Start-Process 'cmd.exe' -ArgumentList "/C reg.exe LOAD HKU\$($u.SID) `"$($u.UserHive)`"" `
             -Wait -WindowStyle Hidden
     }
-    Write-AuditLog "  Found profile: $($u.UserName) SID:$($u.SID)"
+    Write-Host "  Profile: $($u.UserName)  ($($u.Path))"
 }
 
-Write-AuditLog "  Total profiles found: $($allProfiles.Count)"
-
-# Step 3 -- Per-user reset
-Write-AuditLog '[Step 3] Resetting browsers per profile'
+# ---- Per-user reset --------------------------------------------------------
+Write-Host "`n[Step 3] Resetting browsers for each profile..."
 
 foreach ($u in $allProfiles) {
-    Write-AuditSeparator
-    Write-AuditLog "Processing user: $($u.UserName)"
+    Write-Host "`n--- User: $($u.UserName) ---"
 
-    # Chromium browsers
+    # Chromium-engine browsers
     $chromiumBrowsers = @(
-        @{ Label='Chrome';   Path="$($u.Path)\AppData\Local\Google\Chrome\User Data" },
-        @{ Label='Edge';     Path="$($u.Path)\AppData\Local\Microsoft\Edge\User Data" },
-        @{ Label='Brave';    Path="$($u.Path)\AppData\Local\BraveSoftware\Brave-Browser\User Data" },
-        @{ Label='Vivaldi';  Path="$($u.Path)\AppData\Local\Vivaldi\User Data" },
-        @{ Label='Opera';    Path="$($u.Path)\AppData\Roaming\Opera Software\Opera Stable" },
-        @{ Label='Opera GX'; Path="$($u.Path)\AppData\Roaming\Opera Software\Opera GX Stable" },
-        @{ Label='Chromium'; Path="$($u.Path)\AppData\Local\Chromium\User Data" }
+        @{ Label='Chrome';    Path="$($u.Path)\AppData\Local\Google\Chrome\User Data" },
+        @{ Label='Edge';      Path="$($u.Path)\AppData\Local\Microsoft\Edge\User Data" },
+        @{ Label='Brave';     Path="$($u.Path)\AppData\Local\BraveSoftware\Brave-Browser\User Data" },
+        @{ Label='Vivaldi';   Path="$($u.Path)\AppData\Local\Vivaldi\User Data" },
+        @{ Label='Opera';     Path="$($u.Path)\AppData\Roaming\Opera Software\Opera Stable" },
+        @{ Label='Opera GX';  Path="$($u.Path)\AppData\Roaming\Opera Software\Opera GX Stable" },
+        @{ Label='Chromium';  Path="$($u.Path)\AppData\Local\Chromium\User Data" }
     )
 
     foreach ($b in $chromiumBrowsers) {
         if (Test-Path $b.Path) {
-            Write-AuditLog "  Detected: $($b.Label)"
-            Reset-ChromiumProfile -UserDataPath $b.Path -Label $b.Label -UserName $u.UserName
+            Reset-ChromiumProfile -UserDataPath $b.Path -Label $b.Label
         }
     }
 
-    # Firefox browsers
+    # Firefox-engine browsers
     $firefoxBrowsers = @(
-        @{ Label='Firefox';   Roaming="$($u.Path)\AppData\Roaming\Mozilla\Firefox\Profiles";  Local="$($u.Path)\AppData\Local\Mozilla\Firefox\Profiles" },
-        @{ Label='Waterfox';  Roaming="$($u.Path)\AppData\Roaming\Waterfox\Profiles";          Local="$($u.Path)\AppData\Local\Waterfox\Profiles" },
-        @{ Label='LibreWolf'; Roaming="$($u.Path)\AppData\Roaming\librewolf\Profiles";         Local="$($u.Path)\AppData\Local\librewolf\Profiles" }
+        @{ Label='Firefox';   Roaming="$($u.Path)\AppData\Roaming\Mozilla\Firefox\Profiles";   Local="$($u.Path)\AppData\Local\Mozilla\Firefox\Profiles" },
+        @{ Label='Waterfox';  Roaming="$($u.Path)\AppData\Roaming\Waterfox\Profiles";           Local="$($u.Path)\AppData\Local\Waterfox\Profiles" },
+        @{ Label='LibreWolf'; Roaming="$($u.Path)\AppData\Roaming\librewolf\Profiles";          Local="$($u.Path)\AppData\Local\librewolf\Profiles" }
     )
 
     foreach ($b in $firefoxBrowsers) {
         if (Test-Path $b.Roaming) {
-            Write-AuditLog "  Detected: $($b.Label)"
-            Reset-FirefoxProfile -RoamingPath $b.Roaming -LocalPath $b.Local -Label $b.Label -UserName $u.UserName
+            Reset-FirefoxProfile -RoamingPath $b.Roaming -LocalPath $b.Local -Label $b.Label
         }
     }
 }
 
-# Step 4 -- Unload hives
+# ---- Unload hives ----------------------------------------------------------
 foreach ($sid in $loadedHives) {
     [gc]::Collect()
     Start-Sleep -Seconds 1
     Start-Process 'cmd.exe' -ArgumentList "/C reg.exe UNLOAD HKU\$sid" -Wait -WindowStyle Hidden | Out-Null
 }
 
-# ===========================================================================
-# FINAL AUDIT RECORD
-# ===========================================================================
-$endTime = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-Write-AuditSeparator
-Write-AuditLog 'FINAL AUDIT RECORD'
-Write-AuditLog "Machine        : $machineName"
-Write-AuditLog "Domain         : $domainName"
-Write-AuditLog "Started        : $runTime"
-Write-AuditLog "Completed      : $endTime"
-Write-AuditLog "Run As         : $runAs"
-Write-AuditLog "Profiles reset : $($allProfiles.Count)"
-Write-AuditLog "Items removed  : $($script:Removed)"
-Write-AuditLog "Items preserved: $($script:Preserved) (passwords/bookmarks/history/certs)"
-Write-AuditLog "Warnings       : $($script:Warned)"
-Write-AuditLog "Errors         : $($script:Errors)"
-Write-AuditLog "Exit code      : $($script:ExitCode)"
-Write-AuditLog "Log location   : $LogFile"
-Write-AuditSeparator
-
+# ---- Result ----------------------------------------------------------------
+Write-Host "`n======================================================="
 if ($script:ExitCode -eq 0) {
-    $outcome = "SUCCESS: All browsers reset. $($script:Removed) items removed. $($script:Preserved) preserved."
-    Write-AuditLog $outcome
-    Set-UDFStatus "BrowserReset: OK Removed:$($script:Removed) Preserved:$($script:Preserved) | $machineName | $endTime"
+    Write-Host 'SUCCESS: All browsers reset. Passwords/history/bookmarks preserved.'
 } else {
-    $outcome = "COMPLETE WITH WARNINGS: $($script:Removed) removed | $($script:Warned) warnings. Review log: $LogFile"
-    Write-AuditLog $outcome 'WARN'
-    Set-UDFStatus "BrowserReset: WARN Removed:$($script:Removed) Warnings:$($script:Warned) | $machineName | $endTime"
+    Write-Host 'COMPLETE WITH WARNINGS: Some items could not be removed. Review output above.'
 }
-
+Write-Host '======================================================='
 exit $script:ExitCode
